@@ -49,7 +49,7 @@ void MotorController::writeHardwarePWM(uint8_t pin1, uint8_t pin2, int16_t speed
     digitalWrite(pin1, LOW);
     digitalWrite(pin2, LOW);
   }
-}
+} 
 
 void MotorController::hardBrake() {
   digitalWrite(Config::M1_IN1, HIGH);
