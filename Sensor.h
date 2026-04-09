@@ -2,6 +2,7 @@
 #define SENSOR_H
 
 #include "Config.h"
+#include "PS2Mouse.h"
 #include <cstdint>
 
 /**
@@ -15,6 +16,11 @@ struct SensorData {
   int16_t  heading;     
   int16_t  accelX;     
   int16_t  accelY;
+};
+
+struct Position {
+  volatile int32_t globalMouseX;
+  volatile int32_t globalMouseY;
 };
 
 class SensorManager {
@@ -32,8 +38,13 @@ class SensorManager {
     static uint16_t getDistance(uint8_t sensorIndex);
     static int16_t getHeading();
 
-    static  int32_t getEncoderTicks();
-    static void resetEncoders();
+    static void onHeartBeat();
+    static Position getPosition();
+    static int32_t getForwardDistance();
+    static int32_t getLateralDrift();
+    static void resetPosition();
+    static void resetMouseTimer();
+
     
     static bool isWallDetected(uint8_t direction);
     static void calibrateGyro();
@@ -43,8 +54,8 @@ class SensorManager {
     static uint8_t    _currentSensorIdx; 
     static uint32_t   _lastPingTime;
     static int16_t _gyroBias;
-
-
+    static Position _currentPosition;
+    
 };
 
 #endif

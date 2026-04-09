@@ -7,15 +7,11 @@ SensorData SensorManager::_currentData = { {0,0,0,0}, 0, 0, 0 };
 uint8_t    SensorManager::_currentSensorIdx = 0;
 uint32_t   SensorManager::_lastPingTime = 0;
 int16_t SensorManager::_gyroBias = 0;
+int32_t SensorManager::_currentPosition = {0,0};
 
-
-static int32_t totalTicks = 0;
-static uint16_t lastHardwareCount = 0;
-
-
-static int32_t _encoderOffset = 0;
 
 HardwareTimer *MyTim;
+PS2Mouse opticalMouse(Config::MOUSE_CLK, Config::MOUSE_DAT);
 
 
 void SensorManager::init() 
@@ -27,31 +23,18 @@ void SensorManager::init()
     digitalWrite(Config::US_PINS[i].trig, LOW);
   }
 
-  // setup for enncoders.
-  pinMode(Config::ENC_A, INPUT_PULLUP);
-  pinMode(Config::ENC_B, INPUT_PULLUP);
-
+  // Mouse initialization.
   MyTim = new HardwareTimer(TIM3);
+  opticalMouse.initiliaze();
 
-  TIM_Encoder_InitTypeDef encoderConfig;
-  encoderConfig.EncoderMode = TIM_ENCODERMODE_TI12;
-  encoderConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-  encoderConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-  encoderConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-  encoderConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-  encoderConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  encoderConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  encoderConfig.IC1Filter = 8; // This replaces your old setFilter(1,8)
-  encoderConfig.IC2Filter = 8; // This replaces your old setFilter(2,8)
-
-  HAL_TIM_Encoder_Init(MyTim->getHandle(), &encoderConfig);
-
-  //  Start the counter
-  HAL_TIM_Encoder_Start(MyTim->getHandle(), TIM_CHANNEL_ALL);
-  MyTim->setCount(0);
+  MyTim->pause();
+  MyTim->setOverflow(200, HERTZ_FORMAT);
+  MyTim->attachInterrupt(onHeartBeat);
+  MyTim->resume();
 
   // IMU
   Wire.begin();
+  Wire.setClock(400000);
   Wire.beginTransmission(Config::IMU_ADDR);
   Wire.write(0x6B);
   Wire.write(0);
@@ -105,6 +88,28 @@ void SensorManager::update()
 
 }
 
+Position SensorManager::getPosition(){
+
+  noInterrupts();
+  Position position =  _currentPosition;
+  interrupts();
+  return position;
+
+}
+
+int32_t SensorManager::getForwardDistance() {
+   return _currentPosition.y;
+}
+
+int32_t SensorManager::getLateralDrift() {
+    return _currentPosition.x;
+}
+void SensorManager::resetPosition() {
+    noInterrupts();
+    _currentPosition = { 0,0 }
+    interrupts();
+}
+
 uint16_t SensorManager::getDistance(uint8_t sensorIndex) 
 {
   return _currentData.distance[sensorIndex & 0x03];
@@ -115,17 +120,7 @@ bool SensorManager::isWallDetected(uint8_t sensorIndex)
   return (_currentData.distance[sensorIndex & 0X03] < 120);
 }
 
-int32_t SensorManager::getEncoderTicks() {
-  uint16_t currentCount = (uint16_t)MyTim->getCount();
-  int16_t diff = (int16_t)(currentCount - lastHardwareCount);
-
-  totalTicks += diff;
-  lastHardwareCount = currentCount;
-
-  return totalTicks;
-}
-
-void SensorManager::resetEncoders() {
+void SensorManager::resetMouseTimer() {
   MyTim->setCount(0);
 }
 
@@ -147,6 +142,15 @@ void SensorManager::calibrateGyro() {
 
 int16_t SensorManager::getHeading() {
     return _currentData.heading;
+}
+
+void onHeartBeat () {
+  PS2Mouse::MouseData mData = opticalMouse.readData();
+
+  // Accumulate the read data.
+  _currentPosition.globalMouseX += mData.position.x;
+  _currentPosition.globalMouseY += mData.position.y;
+
 }
 
 

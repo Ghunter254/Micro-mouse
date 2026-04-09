@@ -13,16 +13,16 @@ void Navigator::init()
   _posX = 0; _posY = 0;
   _targetHeading = 0; // Start facing North
   _currentState = Config::IDLE;
+  _isReturning = false;
 
-  for (uint8_t y=0; y< Config::MAZE_SIZE; y++) {
-    for (uint8_t x=0; x < Config::MAZE_SIZE; x++){
-      // Manhattan distance to center (7,7) to (8,8)
-      uint8_t dx = (x < 8) ? (7 - x) : (x - 8);
-      uint8_t dy = (y < 8) ? (7 - y) : (y - 8);
-      _distMap[x][y] = dx + dy;
-      _maze[x][y] = 0;
-    }
+  for (uint8_t x = 0; x < Config::MAZE_SIZE; x++) {
+      for (uint8_t y = 0; y < Config::MAZE_SIZE; y++) {
+          _maze[x][y] = 0;
+      }
   }
+
+  setTarget(false);
+  computePath();
 }
 
 void Navigator::update()
@@ -42,7 +42,7 @@ void Navigator::update()
       break;
 
     case Config::SPRINT:
-      // write logic for high-speed runs here .. todo
+      executeSprint();
       break;
 
     case Config::CALIBRATE:
@@ -55,10 +55,10 @@ void Navigator::update()
 
 void Navigator::moveForwardOneCell()
 {
-  SensorManager::resetEncoders();
-  int32_t startTicks = SensorManager::getEncoderTicks();
+  Position startingPosition = SensorManager::getPosition();
+  int32_t posY = startingPosition.y;
 
-  while ((SensorManager::getEncoderTicks() - startTicks) < Config::TICKS_PER_CELL) {
+  while ((SensorManager::getForwardDistance() - posY) < Config::TICKS_PER_CELL) {
     // Use Gyro to stay on _targetHeading
     int16_t currentHeading = SensorManager::getHeading();
     int16_t error = _targetHeading - currentHeading; 
@@ -114,7 +114,29 @@ void Navigator::updateMap() {
   // Circular shift the bits to align with North/East/South/West
   uint8_t absoluteWalls = ((relativeWalls << shift) | (relativeWalls >> (4 - shift))) & 0x0F;
   
+  // Update the current wall.
   _maze[_posX][_posY] |= (absoluteWalls | Config::VISITED);
+
+  // Updating the neighbouring walls.
+  // If we have a North wall, the cell above us has a South wall.
+  if ((absoluteWalls & Config::WALL_N) && (_posY < Config::MAZE_SIZE - 1)) {
+      _maze[_posX][_posY + 1] |= Config::WALL_S;
+  }
+
+  // If we have an East wall, the cell to the right has a West wall.
+  if ((absoluteWalls & Config::WALL_E) && (_posX < Config::MAZE_SIZE - 1)) {
+      _maze[_posX + 1][_posY] |= Config::WALL_W;
+  }
+
+  // If we have a South wall, the cell below us has a North wall.
+  if ((absoluteWalls & Config::WALL_S) && (_posY > 0)) {
+      _maze[_posX][_posY - 1] |= Config::WALL_N;
+  }
+
+  // If we have a West wall, the cell to the left has an East wall.
+  if ((absoluteWalls & Config::WALL_W) && (_posX > 0)) {
+      _maze[_posX - 1][_posY] |= Config::WALL_E;
+  }
 
 }
 
@@ -142,10 +164,10 @@ void Navigator::computePath() {
               if (!(walls & Config::WALL_W) && x > 0)
                   if (_distMap[x-1][y] < minVal) minVal = _distMap[x-1][y];
 
-              if (_distMap[x][y] != minVal + 1) {
-                  _distMap[x][y] = minVal + 1;
-                  changed = true;
-              }
+              if (minVal != 255 && _distMap[x][y] != minVal + 1) {
+                    _distMap[x][y] = minVal + 1;
+                    changed = true;
+                }
           }
       }
   }
@@ -174,10 +196,39 @@ void Navigator::determineNextDirection() {
     uint8_t walls = _maze[x][y];
 
     if (currentDist == 0) {
-      _currentState = Config::IDLE;
-      MotorController::hardBrake();
-      // todo ...add some sort of feedback here ...visual oor haptic or something
-      return;
+        if (!_isReturning) {
+            //  We reached the center!
+            MotorController::hardBrake();
+            
+            // TODO: Play a beep or flash an LED here .. haptic or visual feedback or something
+            delay(1000); 
+
+            // Flip the state and set the goal to the Start (0,0)
+            _isReturning = true;
+            setTarget(true);
+
+            // Wash the new gradient over the maze
+            computePath();
+            
+            // Return immediately so the next loop starts driving back
+            return; 
+        } 
+        else {
+            MotorController::hardBrake();
+            
+            // Reset the target to the center for the Sprint run
+            _isReturning = false;
+            setTarget(false);
+            computePath(); 
+
+            generateSprintPath();
+
+            // The maze is mapped. We are ready for the high-speed run.
+            _currentState = Config::SPRINT; 
+            
+            // TODO: Wait for user input (button press) before starting SPRINT
+            return;
+        }
     }
 
     // We look for a neighbor whose distance is exactly currentDist - 1
@@ -228,18 +279,165 @@ void Navigator::faceHeading(int16_t requiredHeading) {
     }
 }
 
+void Navigator::setTarget(bool returnToStart)
+{
+  for (uint8_t x = 0; x < Config::MAZE_SIZE; x++) {
+      for (uint8_t y = 0; y < Config::MAZE_SIZE; y++) {
+          _distMap[x][y] = 255; // 255 represents "Uncalculated"
+      }
+  }
+
+  if (returnToStart) {
+        _distMap[0][0] = 0; // The start cell is the new goal
+    } else {
+        // The standard 4 center cells are the goal
+        _distMap[7][7] = 0;
+        _distMap[7][8] = 0;
+        _distMap[8][7] = 0;
+        _distMap[8][8] = 0;
+    }
+
+}
 
 
+void Navigator::generateSprintPath() {
+    uint8_t x = 0;
+    uint8_t y = 0;
+    int16_t simHeading = 0; // 0=N, 256=E, 512=S, 768=W
+    
+    _totalSprintMoves = 0;
+    _currentMoveIndex = 0;
 
+    // Follow the gradient downhill until we reach the center (0)
+    while (_distMap[x][y] != 0) {
+        uint8_t currentDist = _distMap[x][y];
+        uint8_t walls = _maze[x][y];
+        int16_t nextHeading = simHeading;
+        uint8_t nextX = x, nextY = y;
 
+        // Find the downhill neighbor
+        if (!(walls & Config::WALL_N) && y < 15 && _distMap[x][y+1] == currentDist - 1) {
+            nextHeading = 0; nextY = y + 1;
+        } else if (!(walls & Config::WALL_E) && x < 15 && _distMap[x+1][y] == currentDist - 1) {
+            nextHeading = 256; nextX = x + 1;
+        } else if (!(walls & Config::WALL_S) && y > 0 && _distMap[x][y-1] == currentDist - 1) {
+            nextHeading = 512; nextY = y - 1;
+        } else if (!(walls & Config::WALL_W) && x > 0 && _distMap[x-1][y] == currentDist - 1) {
+            nextHeading = 768; nextX = x - 1;
+        }
 
+        // Calculate if a turn is required to face that neighbor
+        if (nextHeading != simHeading) {
+            int16_t diff = (nextHeading - simHeading) & 1023;
+            
+            if (diff == 256) {
+                _sprintPath[_totalSprintMoves++] = {CMD_TURN_R, 0};
+            } else if (diff == 768) {
+                _sprintPath[_totalSprintMoves++] = {CMD_TURN_L, 0};
+            } else if (diff == 512) {
+                // Should mathematically never happen on an optimal path, but safe to trap
+                _sprintPath[_totalSprintMoves++] = {CMD_TURN_R, 0};
+                _sprintPath[_totalSprintMoves++] = {CMD_TURN_R, 0};
+            }
+            simHeading = nextHeading; // Update our simulated heading
+        }
 
+        // Move Forward (With Compression)
+        // If the previous command was ALSO a forward, just increment its cell multiplier
+        if (_totalSprintMoves > 0 && _sprintPath[_totalSprintMoves - 1].command == CMD_FORWARD) {
+            _sprintPath[_totalSprintMoves - 1].cells++;
+        } else {
+            // Otherwise, start a new forward command
+            _sprintPath[_totalSprintMoves++] = {CMD_FORWARD, 1};
+        }
 
+        // Move to the next cell for the next loop iteration
+        x = nextX;
+        y = nextY;
+    }
 
+    // Terminate the array with the finish command
+    _sprintPath[_totalSprintMoves++] = {CMD_FINISH, 0};
+}
 
+void Navigator::sprintForward(uint8_t cells) {
+    // We stop 40 counts early to account for braking inertia
+    int32_t targetCounts = (cells * Config::COUNTS_PER_CELL) - 40; 
+    
+    // Trapezoidal Parameters
+    int32_t accelCounts = Config::COUNTS_PER_CELL / 2; // Accelerate over half a cell
+    int32_t decelCounts = Config::COUNTS_PER_CELL;     // Decelerate over a full cell
+    
+    // If the straightaway is too short for the full profile, adjust to a triangle profile
+    if (targetCounts < accelCounts + decelCounts) {
+        accelCounts = targetCounts / 3;
+        decelCounts = targetCounts / 2;
+    }
 
+    int16_t minSpeed = 250; 
+    int16_t maxSpeed = 850; // SPRINT TOP SPEED
 
+    SensorManager::resetDistance();
 
+    while (abs(SensorManager::getForwardDistance()) < targetCounts) {
+        int32_t dist = abs(SensorManager::getForwardDistance());
+        int16_t baseSpeed = maxSpeed;
+
+        // Acceleration Phase (Ramp Up)
+        if (dist < accelCounts) {
+            baseSpeed = minSpeed + ((maxSpeed - minSpeed) * dist) / accelCounts;
+        } 
+        // Deceleration Phase (Ramp Down)
+        else if (dist > targetCounts - decelCounts) {
+            int32_t decelProgress = dist - (targetCounts - decelCounts);
+            baseSpeed = maxSpeed - ((maxSpeed - minSpeed) * decelProgress) / decelCounts;
+            
+            // Clamp so we don't go backwards or stall
+            if (baseSpeed < minSpeed) baseSpeed = minSpeed; 
+        }
+
+        // Heading PID (Keep it perfectly straight)
+        int16_t currentHeading = SensorManager::getHeading();
+        int16_t error = _targetHeading - currentHeading; 
+        if (error > 512)  error -= 1024;
+        if (error < -512) error += 1024;
+        
+        int16_t correction = (error * 5) >> 2; 
+        MotorController::setSpeed(baseSpeed + correction, baseSpeed - correction);
+        
+        // Catastrophic Crash Safety (Only engage if near a wall)
+        if (SensorManager::getDistance(Config::FRONT) < 50 && dist > targetCounts - 400) {
+            break; 
+        }
+    }
+
+    MotorController::hardBrake();
+    delay(50); // Let the chassis settle before executing the next turn
+}
+
+void Navigator::executeSprint() {
+    if (_currentMoveIndex >= _totalSprintMoves) return; // Safety bounds
+
+    SprintMove currentMove = _sprintPath[_currentMoveIndex];
+
+    switch(currentMove.command) {
+        case CMD_FORWARD:
+            sprintForward(currentMove.cells); 
+            break;
+        case CMD_TURN_R:
+            turn90(1); 
+            break;
+        case CMD_TURN_L:
+            turn90(0); 
+            break;
+        case CMD_FINISH:
+            MotorController::hardBrake();
+            _currentState = Config::IDLE; // We won!
+            return;
+    }
+
+    _currentMoveIndex++;
+}
 
 
 
